@@ -1,21 +1,22 @@
 package main
 
-import (
+import(
     "fmt"
     "os"
     "log"
-    "database/sql"
+    "strings"
     "github.com/codegangsta/cli"
+    "database/sql"
     _ "github.com/mattn/go-sqlite3"
-    "regexp"
     "net/http"
     "io/ioutil"
+    "regexp"
     "crypto/sha256"
 )
 
-const SQLITE_FILE = "cve_watch.db?cache=shared&mode=rwc"
+const SQLITE_FILE = "cve_watch.db"
 
-func main() {
+func main(){
     app := cli.NewApp()
     app.Name = "cve_watch"
     app.Usage = "watch security advisory based on the CVE number."
@@ -49,16 +50,13 @@ func main() {
     app.Run(os.Args)
 }
 
-
 func db_init(db *sql.DB) error {
     sqlStmt := `
     PRAGMA foreign_keys = ON;
-
     create table if not exists cve (
         number TEXT null primary key, 
         created_at DEFAULT (DATETIME('now','localtime'))
     );
-
     create table if not exists watch (
         url text, 
         hash text, 
@@ -70,207 +68,254 @@ func db_init(db *sql.DB) error {
     _, err := db.Exec(sqlStmt)
     if err != nil {
         log.Printf("%q: %s\n", err, sqlStmt)
-        return nil
     }
+
     return nil
 }
 
-func get_hash(html_raw string) string {
-    re, _ := regexp.Compile("\\(?i)<script[\\S\\s]+?\\</script\\>")
-    html_raw = re.ReplaceAllString(html_raw, "")
-    return fmt.Sprintf("%x", sha256.Sum256([]byte(replaced)))
+func check_sites(cve_number string) map[string]string {
+
+    watch_list := []string{
+        "https://access.redhat.com/security/cve/" + cve_number,
+        "https://security-tracker.debian.org/tracker/" + cve_number,
+        "https://people.canonical.com/~ubuntu-security/cve/" + cve_number + ".html",
+    }
+
+    result := make(map[string]string)
+
+    for _, url := range watch_list{
+        resp, _ := http.Get(url)
+        defer resp.Body.Close()
+        byteArray, _ := ioutil.ReadAll(resp.Body)
+        html := string(byteArray)
+
+        // all of the tags to lowercase
+        re, _ := regexp.Compile(`\<[\S\s]+?\>`)
+        html = re.ReplaceAllStringFunc(html, strings.ToLower)
+
+        // delete script tags
+        re, _ = regexp.Compile(`\<script[\S\s]+?\</script\>`)
+        html = re.ReplaceAllString(html, "")
+
+        // delete comment tags
+        re, _ = regexp.Compile(`\<\!-\-[\s\S]*?\-\-\>`)
+        html = re.ReplaceAllString(html, "")
+
+        // generate hash
+        hash :=  fmt.Sprintf("%x", sha256.Sum256([]byte(html)))
+
+        // save hash
+        result[url] = hash
+    }
+
+    return result
 }
 
 func addAction(ctx *cli.Context) error {
-	var cve_number = ""
+    var cve_number = ""
 
-	if len(ctx.Args()) > 0 {
-		cve_number = ctx.Args().First() 
-	}
+    // option parser
+    if len(ctx.Args()) > 0 {
+        cve_number = ctx.Args().First() 
+    }
 
-        db, err := sql.Open("sqlite3", SQLITE_FILE)
-        if err != nil {
-            log.Fatal(err)
-        }
-        defer db.Close()
+    // option validation
+    r := regexp.MustCompile(`(?i)cve-\d+?-\d+?`)
 
-        db_init(db)
-
-        r := regexp.MustCompile(`(?i)cve-\d+?-\d+?`)
-
-        if r.MatchString(cve_number) == false {
-		log.Printf("validation error of cve number\n")
-                return nil
-        }
-
-	rows, err := db.Query("select number, created_at from cve where number = ?", cve_number)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer rows.Close()
-
-        if rows.Next() == true {
-		log.Printf("Already regist cve number %s\n", cve_number )
-		return nil
-        }
-
-	err = rows.Err()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Printf("Add %s in to the databse\n", cve_number)
-
-        sqlStmt := `
-        insert into cve(number) values(?);
-        `
-	_, err = db.Exec(sqlStmt, cve_number)
-	if err != nil {
-		log.Printf("%q: %s\n", err, sqlStmt)
-		return nil
-	}
-
-        watch_url := []string{
-            "https://access.redhat.com/security/cve/" + cve_number,
-            "https://security-tracker.debian.org/tracker/" + cve_number,
-            "https://people.canonical.com/~ubuntu-security/cve/" + cve_number + ".html",
-        }
-
-        for _, url := range watch_url{
-            resp, err := http.Get(url)
-            if err != nil {
-		log.Printf("%s\n", err)
-		return nil
-            }
-            defer resp.Body.Close()
-            html_raw, _ := ioutil.ReadAll(resp.Body)
-
-            hash := get_hash(html_raw)
-
-            sqlStmt = `
-            insert into watch(url, hash, cve_number) values(?, ?, ?);
-            `
-            _, err = db.Exec(sqlStmt, url, hash, cve_number)
-            if err != nil {
-                log.Printf("%q: %s\n", err, sqlStmt)
-                return nil
-            }
-        }
-
+    if r.MatchString(cve_number) == false {
+        log.Printf("validation error of cve number\n")
         return nil
+    }
+
+    // initialize database
+    db, err := sql.Open("sqlite3", SQLITE_FILE)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer db.Close()
+    db_init(db)
+
+    // check duplicate record 
+    rows, err := db.Query("select number, created_at from cve where number = ?", cve_number)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer rows.Close()
+
+    if rows.Next() == true {
+        log.Printf("Already regist cve number %s\n", cve_number )
+        return nil
+    }
+
+    err = rows.Err()
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // insert cve record
+    sql := `
+    insert into cve(number) values(?);
+    `
+    _, err = db.Exec(sql, cve_number)
+
+    if err != nil {
+        log.Printf("%q: %s\n", err, sql)
+        return nil
+    }
+
+    // check target site
+    result := check_sites(cve_number)
+
+    // insert watch record
+    sql = `
+    insert into watch(url, hash, cve_number) values (?, ?, ?);
+    `
+    for key, val := range result{
+        _, err = db.Exec(sql, key, val, cve_number)
+        if err != nil {
+            log.Printf("%q: %s\n", err, sql)
+            return nil
+        }
+    }
+
+    return nil
 }
 
 func delAction(ctx *cli.Context) error {
-	var cve_number = ""
+    var cve_number = ""
 
-	if len(ctx.Args()) > 0 {
-		cve_number = ctx.Args().First() 
-	}
+    // option parser
+    if len(ctx.Args()) > 0 {
+        cve_number = ctx.Args().First() 
+    }
 
-        db, err := sql.Open("sqlite3", SQLITE_FILE)
-        if err != nil {
-            log.Fatal(err)
-        }
-        defer db.Close()
+    // option validation
+    r := regexp.MustCompile(`(?i)cve-\d+?-\d+?`)
 
-        db_init(db)
-
-        r := regexp.MustCompile(`(?i)cve-\d+?-\d+?`)
-
-        if r.MatchString(cve_number) == false {
-		log.Printf("validation error of cve number\n")
-                return nil
-        }
-
-	fmt.Printf("Delete %s related data\n", cve_number)
-
-        sqlStmt := `
-        delete from cve where number = ?;
-        `
-	_, err = db.Exec(sqlStmt, cve_number)
-	if err != nil {
-		log.Printf("%q: %s\n", err, sqlStmt)
-		return nil
-	}
-
+    if r.MatchString(cve_number) == false {
+        log.Printf("validation error of cve number\n")
         return nil
+    }
+
+    // initialize database
+    db, err := sql.Open("sqlite3", SQLITE_FILE)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer db.Close()
+    db_init(db)
+
+    // delete record
+    sql := `
+    delete from cve where number = ?;
+    `
+    _, err = db.Exec(sql, cve_number)
+    if err != nil {
+        log.Printf("%q: %s\n", err, sql)
+        return nil
+    }
+
+    return nil
 }
 
 func listAction(ctx *cli.Context) error {
-        db, err := sql.Open("sqlite3", SQLITE_FILE)
+    // initialize database
+    db, err := sql.Open("sqlite3", SQLITE_FILE)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer db.Close()
+    db_init(db)
+
+    rows, err := db.Query("select number, created_at from cve")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer rows.Close()
+
+    fmt.Printf("CVE_NUMBER\tCREATED_AT\n")
+
+    for rows.Next() {
+        var cve_number string
+        var created_at string
+        err = rows.Scan(&cve_number, &created_at)
         if err != nil {
             log.Fatal(err)
         }
-        defer db.Close()
+        fmt.Printf("%s\t%s\n" , cve_number, created_at)
 
-        db_init(db)
+    }
+    err = rows.Err()
+    if err != nil {
+        log.Fatal(err)
+    }
 
-	rows, err := db.Query("select number, created_at from cve")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer rows.Close()
-
-        fmt.Printf("CVE_NUMBER\tCREATED_AT\n")
-
-	for rows.Next() {
-		var cve_number string
-		var created_at string
-		err = rows.Scan(&cve_number, &created_at)
-		if err != nil {
-			log.Fatal(err)
-		}
-		fmt.Printf("%s\t%s\n" , cve_number, created_at)
-
-	}
-	err = rows.Err()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-        return nil
+    return nil
 }
 
 func checkAction(ctx *cli.Context) error {
-        db, err := sql.Open("sqlite3", SQLITE_FILE)
+    update_sites := make(map[string]string)
+
+    // initialize database
+    db, err := sql.Open("sqlite3", SQLITE_FILE)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer db.Close()
+    db_init(db)
+
+    // select all record of cve table
+    cve_rows, err := db.Query("select number from cve")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer cve_rows.Close()
+
+    for cve_rows.Next() {
+        var cve_number = ""
+        err = cve_rows.Scan(&cve_number)
+
         if err != nil {
             log.Fatal(err)
         }
-        defer db.Close()
 
-        db_init(db)
+        // check site
+        result := check_sites(cve_number)
 
-	rows, err := db.Query("select url, hash from watch")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer rows.Close()
+        // select record of watch table 
+        watch_rows, err := db.Query("select url, hash from watch where cve_number = ?", cve_number)
+        if err != nil {
+            log.Fatal(err)
+        }
+        defer watch_rows.Close()
 
-        for rows.Next() {
-            var url string
-            var saved_hash string
-            err = rows.Scan(&url, &saved_hash)
-            if err != nil {
-                log.Fatal(err)
+        for watch_rows.Next() {
+            var url = ""
+            var saved_hash = ""
+            err = watch_rows.Scan(&url, &saved_hash)
+            // check hash
+            if(saved_hash == result[url]){
+                break
             }
 
-            resp, err := http.Get(url)
-            if err != nil {
-                log.Printf("%s\n", err)
-                return nil
-            }
-            defer resp.Body.Close()
-            html_raw, _ := ioutil.ReadAll(resp.Body)
-            new_hash := get_hash(html_raw)
-            fmt.Printf("SAVE %s\n", saved_hash)
-            fmt.Printf("NEW  %s\n", new_hash)
-       }
+            // detect update site
+            update_sites[url] = result[url]
+        }
+    }
 
-	err = rows.Err()
-	if err != nil {
-		log.Fatal(err)
-	}
+    // update watch table
+    for url, hash := range update_sites {
+        sql := `
+        update watch hash = ? where url = ?
+        `
+        _, err = db.Exec(sql, hash, url)
+        if err != nil {
+            log.Printf("%q: %s\n", err, sql)
+            return nil
+        }
+    }
 
-        return nil
+    return nil
 }
+
 
