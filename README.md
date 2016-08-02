@@ -1,6 +1,6 @@
 # cve_watch
 
-Tracking of patch information base on the CVE number
+Tracking of patch information base on the CVE number for debian, ubuntu and redhat.
 
 ## Usage
 
