@@ -305,6 +305,7 @@ func checkAction(ctx *cli.Context) error {
 
     // update watch table
     for url, hash := range update_sites {
+        fmt.Printf("UPDATE : %s", url)
         sql := `
         update watch hash = ? where url = ?
         `
