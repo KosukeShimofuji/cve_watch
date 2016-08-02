@@ -14,7 +14,7 @@ import(
     "crypto/sha256"
 )
 
-const SQLITE_FILE = "cve_watch.db"
+const SQLITE_FILE = "cve_watch.db?cache=shared&mode=rwc"
 
 func main(){
     app := cli.NewApp()
@@ -53,6 +53,8 @@ func main(){
 func db_init(db *sql.DB) error {
     sqlStmt := `
     PRAGMA foreign_keys = ON;
+    PRAGMA journal_mode = WAL;
+    PRAGMA synchronous = NORMAL;
     create table if not exists cve (
         number TEXT null primary key, 
         created_at DEFAULT (DATETIME('now','localtime'))
@@ -305,15 +307,23 @@ func checkAction(ctx *cli.Context) error {
 
     // update watch table
     for url, hash := range update_sites {
-        fmt.Printf("UPDATE : %s", url)
-        sql := `
-        update watch hash = ? where url = ?
-        `
-        _, err = db.Exec(sql, hash, url)
+
+	tx, err := db.Begin()
+	if err != nil {
+		log.Fatal(err)
+	}
+	stmt, err := tx.Prepare("update watch set hash = ? where url = ?")
+	if err != nil {
+		log.Fatal(err)
+	}
+        defer stmt.Close()
+        _, err = stmt.Exec(hash, url)
         if err != nil {
-            log.Printf("%q: %s\n", err, sql)
-            return nil
+            log.Fatal(err)
         }
+        tx.Commit()
+
+        fmt.Printf("UPDATE : %s (%s)\n", url, hash)
     }
 
     return nil
