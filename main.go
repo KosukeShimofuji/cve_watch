@@ -322,29 +322,32 @@ func checkAction(ctx *cli.Context) error {
 			err = watch_rows.Scan(&saved_html)
 			fmt.Printf("Diff : %s \n", url)
 
-			var dmp = diffmatchpatch.New()
-			diffs := dmp.DiffMain(saved_html, map_var["html"], false)
-			patch := dmp.PatchMake(saved_html, diffs)
-			fmt.Print(dmp.PatchToText(patch))
+			dmp := diffmatchpatch.New()
+			a, b, c := dmp.DiffLinesToChars(saved_html, map_var["html"])
+			diffs := dmp.DiffMain(a, b, false)
+			result := dmp.DiffCharsToLines(diffs, c)
+			fmt.Println(result)
 		}
 
-		tx, err := db.Begin()
-		if err != nil {
-			log.Fatal(err)
-		}
-		stmt, err := tx.Prepare("update watch set html = ?, hash = ? where url = ?")
+		/*
+			tx, err := db.Begin()
+			if err != nil {
+				log.Fatal(err)
+			}
+			stmt, err := tx.Prepare("update watch set html = ?, hash = ? where url = ?")
 
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer stmt.Close()
-		_, err = stmt.Exec(map_var["html"], map_var["hash"], url)
-		if err != nil {
-			log.Fatal(err)
-		}
-		tx.Commit()
+			if err != nil {
+				log.Fatal(err)
+			}
+			defer stmt.Close()
+			_, err = stmt.Exec(map_var["html"], map_var["hash"], url)
+			if err != nil {
+				log.Fatal(err)
+			}
+			tx.Commit()
 
-		fmt.Printf("Update : %s (%s)\n", url, map_var["hash"])
+			fmt.Printf("Update : %s (%s)\n", url, map_var["hash"])
+		*/
 	}
 
 	return nil
