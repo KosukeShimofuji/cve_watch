@@ -104,6 +104,10 @@ func check_sites(cve_number string) map[string]map[string]string {
 		re, _ = regexp.Compile(`\<\!-\-[\s\S]*?\-\-\>`)
 		html = re.ReplaceAllString(html, "")
 
+		// delete meta tags
+		re, _ = regexp.Compile(`<meta\b(?:[^"'>]|"[^"]*"|'[^']*')*>`)
+		html = re.ReplaceAllString(html, "")
+
 		// generate hash
 		hash := fmt.Sprintf("%x", sha256.Sum256([]byte(html)))
 
@@ -258,6 +262,45 @@ func listAction(ctx *cli.Context) error {
 	return nil
 }
 
+func lineDiff(src1, src2 string) []diffmatchpatch.Diff {
+	dmp := diffmatchpatch.New()
+	a, b, c := dmp.DiffLinesToChars(src1, src2)
+	diffs := dmp.DiffMain(a, b, false)
+	result := dmp.DiffCharsToLines(diffs, c)
+	return result
+}
+
+func prefix(c diffmatchpatch.Operation) string {
+	switch c {
+	case diffmatchpatch.DiffEqual:
+		return " "
+	case diffmatchpatch.DiffInsert:
+		return "+"
+	case diffmatchpatch.DiffDelete:
+		return "-"
+	}
+	return " "
+}
+
+func formatDiff(lineDiff []diffmatchpatch.Diff) *string {
+	result := ""
+	for _, diff := range lineDiff {
+		texts := strings.Split(diff.Text, "\n")
+		for _, text := range texts {
+			if diff.Type == diffmatchpatch.DiffEqual {
+				break
+			}
+
+			if len(text) > 0 {
+				result += prefix(diff.Type)
+				result += text
+				result += "\n"
+			}
+		}
+	}
+	return &result
+}
+
 func checkAction(ctx *cli.Context) error {
 	update_sites := make(map[string]map[string]string)
 
@@ -320,34 +363,28 @@ func checkAction(ctx *cli.Context) error {
 		for watch_rows.Next() {
 			var saved_html = ""
 			err = watch_rows.Scan(&saved_html)
-			fmt.Printf("Diff : %s \n", url)
+			fmt.Printf(" * %s \n", url)
 
-			dmp := diffmatchpatch.New()
-			a, b, c := dmp.DiffLinesToChars(saved_html, map_var["html"])
-			diffs := dmp.DiffMain(a, b, false)
-			result := dmp.DiffCharsToLines(diffs, c)
-			fmt.Println(result)
+			fmt.Print(*formatDiff(lineDiff(saved_html, map_var["html"])))
 		}
 
-		/*
-			tx, err := db.Begin()
-			if err != nil {
-				log.Fatal(err)
-			}
-			stmt, err := tx.Prepare("update watch set html = ?, hash = ? where url = ?")
+		tx, err := db.Begin()
+		if err != nil {
+			log.Fatal(err)
+		}
+		stmt, err := tx.Prepare("update watch set html = ?, hash = ? where url = ?")
 
-			if err != nil {
-				log.Fatal(err)
-			}
-			defer stmt.Close()
-			_, err = stmt.Exec(map_var["html"], map_var["hash"], url)
-			if err != nil {
-				log.Fatal(err)
-			}
-			tx.Commit()
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer stmt.Close()
+		_, err = stmt.Exec(map_var["html"], map_var["hash"], url)
+		if err != nil {
+			log.Fatal(err)
+		}
+		tx.Commit()
 
-			fmt.Printf("Update : %s (%s)\n", url, map_var["hash"])
-		*/
+		//fmt.Printf("COMMIT : %s (%s)\n", url, map_var["hash"])
 	}
 
 	return nil
